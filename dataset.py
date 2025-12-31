@@ -29,11 +29,11 @@ class MyDataSet(Dataset):
         mask_df = pd.read_csv(path_mask, header=None)
         
         
-        # Filter images based on naming pattern
-        self.img_list_8 = [img for img in img_list_8 if img.startswith('50_') and img.endswith('_hr.png')]
-        self.img_list_16 = [img for img in img_list_16 if img.startswith('50_') and img.endswith('_hr.png')]
-        self.img_list_32 = [img for img in img_list_32 if img.startswith('50_') and img.endswith('_hr.png')]
-        self.img_list_32_gt = [img for img in img_list_32_gt if img.startswith('50_') and img.endswith('_sr.png')]
+        # Filter images based on naming pattern(sr是输入数据，hr是真值)
+        self.img_list_8 = [img for img in img_list_8 if img.startswith('50_') and img.endswith('_sr.png')]
+        self.img_list_16 = [img for img in img_list_16 if img.startswith('50_') and img.endswith('_sr.png')]
+        self.img_list_32 = [img for img in img_list_32 if img.startswith('50_') and img.endswith('_sr.png')]
+        self.img_list_32_gt = [img for img in img_list_32_gt if img.startswith('50_') and img.endswith('_hr.png')]
         self.mapping = torch.tensor(mapping_df.values)
         self.mask = torch.tensor(mask_df.values)
         if self.mask.min() == 1:
@@ -63,13 +63,15 @@ class MyDataSet(Dataset):
         vmin, vmax = mapping[0], mapping[1]
 
         # Map data back to original range
-        # data_8 = data_8 * (vmax - vmin) + vmin
-        # data_16 = data_16 * (vmax - vmin) + vmin
-        # data_32 = data_32 * (vmax - vmin) + vmin
-        # data_32_gt = data_32_gt * (vmax - vmin) + vmin
+        data_8 = data_8 * (vmax - vmin) + vmin
+        data_16 = data_16 * (vmax - vmin) + vmin
+        data_32 = data_32 * (vmax - vmin) + vmin
+        data_32_gt = data_32_gt * (vmax - vmin) + vmin
 
-        # data_32_gt = data_32_gt.view(-1).float()
-        # data_32_gt = torch.matmul(data_32_gt, self.projection_mask_matrix)
+        data_32_gt = data_32_gt.view(-1).float()
+        data_32_gt = torch.matmul(data_32_gt, self.projection_mask_matrix)
+
+        vmin, vmax = data_32_gt.min(), data_32_gt.max()
 
         return data_8, data_16, data_32, data_32_gt, vmin, vmax
     

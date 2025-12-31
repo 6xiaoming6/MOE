@@ -12,8 +12,8 @@ from datetime import datetime
 import logging
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-batch_size = 32
-epochs = 5000
+batch_size = 64
+epochs = 1000
 save_freq, val_freq = 10, 10
 save_root_dir = './checkpoints'
 
@@ -26,13 +26,13 @@ train_loader, val_loader = DataLoader(train_data, batch_size, False), DataLoader
 net = Model(
             input_sizes=[[8, 8], [16, 16], [32, 32]], 
             output_dim=162,
-            hidden_dim=1024,
+            hidden_dim=512,
             num_experts=8,
-            top_k=2
+            top_k=3
         ).to(device)
 
-learning_rate = 1e-3
-lambdas = [0.9, 0.1]
+learning_rate = 1e-4
+lambdas = [1.0, 0.05]
 loss_fn = torch.nn.MSELoss()
 optimizer = optim.Adam(net.parameters(), lr=learning_rate)
 
@@ -122,7 +122,6 @@ for cur_epoch in range(epochs):
     cnt = 0
     total_loss = 0
     total_mse, total_rmse, total_mae =  0, 0, 0
-    origin_total_mse, origin_total_rmse, origin_total_mae =  0, 0, 0
     for x_8, x_16, x_32, gt, vmin, vmax in train_loader:
         optimizer.zero_grad() #计算前梯度清零
 
@@ -135,37 +134,20 @@ for cur_epoch in range(epochs):
         category_count = train_data.category_counts.to(device)
         projection_mask_matrix = train_data.projection_mask_matrix.to(device)
 
+        origin_output = output * (vmax.view(-1,1) - vmin.view(-1,1)) + vmin.view(-1,1)
 
-        origin_gt = gt.squeeze().detach()
-        origin_gt = origin_gt * (vmax.view(-1,1,1) - vmin.view(-1,1,1)) + vmin.view(-1,1,1)
-        origin_gt = origin_gt.view(origin_gt.shape[0], -1).float()
-        origin_gt = torch.matmul(origin_gt, projection_mask_matrix)
-        vmin, vmax = origin_gt.min(dim = 1, keepdim=True)[0], origin_gt.max(dim = 1, keepdim=True)[0]
-
-
-        gt = gt.view(gt.shape[0], -1).float()
-        gt = torch.matmul(gt, projection_mask_matrix)
-        output /= category_count
+        origin_output /= category_count
         gt /= category_count
 
-        mse = loss_fn(output, gt)
+        mse = loss_fn(origin_output, gt)
         
         loss = lambdas[0] * mse + lambdas[1] * load_balance_loss
 
-        #使用归一化数据计算的损失和指标
-        total_mse += mse.item()
-        total_rmse += torch.sqrt(mse).item()
-        total_mae += torch.nn.L1Loss()(output, gt).item()
-        total_loss += loss.item()
-        #使用映射回原始数据范围的数据计算的损失和指标
-        origin_output = output.detach() * (vmax.view(-1,1) - vmin.view(-1,1)) + vmin.view(-1,1)
-        origin_gt /= category_count
-        origin_output /= category_count
 
-        with torch.no_grad():
-            origin_total_mse += loss_fn(origin_output, origin_gt).item()
-            origin_total_rmse += torch.sqrt(loss_fn(origin_output, origin_gt)).item()
-            origin_total_mae += torch.nn.L1Loss()(origin_output, origin_gt).item()
+        total_mse += loss_fn(origin_output, gt).item()
+        total_rmse += torch.sqrt(loss_fn(origin_output, gt)).item()
+        total_mae += torch.nn.L1Loss()(origin_output, gt).item()
+        total_loss += loss.item()
 
         cnt += 1
 
@@ -183,7 +165,7 @@ for cur_epoch in range(epochs):
         torch.save(optimizer.state_dict(), opt_save_path)
 
         train_logger.info(f'[Epoch {cur_epoch + 1}/{epochs}] --- Loss: {total_loss / cnt :.4f}, MSE: {total_mse / cnt :.4f}, RMSE: {total_rmse / cnt :.4f}, MAE: {total_mae / cnt :.4f}')
-        train_logger.info(f'[Epoch {cur_epoch + 1}/{epochs}] --- Origin MSE: {origin_total_mse / cnt :.4f}, Origin RMSE: {origin_total_rmse / cnt :.4f}, Origin MAE: {origin_total_mae / cnt :.4f}')
+        # train_logger.info(f'[Epoch {cur_epoch + 1}/{epochs}] --- Origin MSE: {origin_total_mse / cnt :.4f}, Origin RMSE: {origin_total_rmse / cnt :.4f}, Origin MAE: {origin_total_mae / cnt :.4f}')
         train_logger.info(f'model save to: {model_save_path}')
 
     #定期验证模型效果
@@ -191,24 +173,23 @@ for cur_epoch in range(epochs):
         net.eval()
         cnt = 0
         total_mse, total_rmse, total_mae = 0, 0, 0
-        for x_8, x_16, x_32, gt,_,_ in val_loader:
+        for x_8, x_16, x_32, gt,vmin, vmax in val_loader:
             # move to device
-            x_8, x_16, x_32, gt = x_8.to(device), x_16.to(device), x_32.to(device), gt.to(device)
+            x_8, x_16, x_32, gt, vmin, vmax = x_8.to(device), x_16.to(device), x_32.to(device), gt.to(device), vmin.to(device), vmax.to(device)
 
             output, load_balance_loss = net(x_8, x_16, x_32)
 
             category_count = val_data.category_counts.to(device)
             projection_mask_matrix = train_data.projection_mask_matrix.to(device)
 
-            gt = gt.view(gt.shape[0], -1).float()
-            gt = torch.matmul(gt, projection_mask_matrix)
+            origin_output = output * (vmax.view(-1, 1) - vmin.view(-1, 1)) + vmin.view(-1, 1)
 
             gt /= category_count
-            output /= category_count
+            origin_output /= category_count
 
-            mse = torch.nn.MSELoss()(output, gt)
+            mse = torch.nn.MSELoss()(origin_output, gt)
             rmse = torch.sqrt(mse)
-            mae = torch.nn.L1Loss()(output, gt)
+            mae = torch.nn.L1Loss()(origin_output, gt)
 
             total_mse += mse.item()
             total_rmse += rmse.item()
