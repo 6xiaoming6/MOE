@@ -14,7 +14,7 @@ import logging
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 batch_size = 64
 epochs = 1000
-save_freq, val_freq = 10, 10
+save_freq, val_freq, print_freq = 100, 10, 10
 save_root_dir = './checkpoints'
 
 if not os.path.isdir(save_root_dir):
@@ -23,15 +23,17 @@ if not os.path.isdir(save_root_dir):
 train_data, val_data = MyDataSet('./data'), MyDataSet('./data', 'val')
 train_loader, val_loader = DataLoader(train_data, batch_size, False), DataLoader(val_data, batch_size, False)
 
+hidden_dim, num_experts, top_k = 1024, 8, 3
+
 net = Model(
             input_sizes=[[8, 8], [16, 16], [32, 32]], 
             output_dim=162,
-            hidden_dim=512,
-            num_experts=8,
-            top_k=3
+            hidden_dim=hidden_dim,
+            num_experts=num_experts,
+            top_k=top_k
         ).to(device)
 
-learning_rate = 1e-4
+learning_rate = 1e-3
 lambdas = [1.0, 0.05]
 loss_fn = torch.nn.MSELoss()
 optimizer = optim.Adam(net.parameters(), lr=learning_rate)
@@ -105,6 +107,9 @@ def setup_logger():
     return logger
 
 def save_config():
+    train_logger.info(f'hidden_num: {hidden_dim}')
+    train_logger.info(f'num_experts: {num_experts}')
+    train_logger.info(f'top-k: {top_k}')
     train_logger.info(f'device: {device}')
     train_logger.info(f'batch_size: {batch_size}')
     train_logger.info(f'epochs: {epochs}')
@@ -164,9 +169,12 @@ for cur_epoch in range(epochs):
         torch.save(net.state_dict(), model_save_path)
         torch.save(optimizer.state_dict(), opt_save_path)
 
-        train_logger.info(f'[Epoch {cur_epoch + 1}/{epochs}] --- Loss: {total_loss / cnt :.4f}, MSE: {total_mse / cnt :.4f}, RMSE: {total_rmse / cnt :.4f}, MAE: {total_mae / cnt :.4f}')
         # train_logger.info(f'[Epoch {cur_epoch + 1}/{epochs}] --- Origin MSE: {origin_total_mse / cnt :.4f}, Origin RMSE: {origin_total_rmse / cnt :.4f}, Origin MAE: {origin_total_mae / cnt :.4f}')
-        train_logger.info(f'model save to: {model_save_path}')
+        train_logger.info(f'[Epoch {cur_epoch + 1}/{epochs}] --- model save to: {model_save_path}')
+
+    if(cur_epoch + 1) % print_freq == 0:
+        train_logger.info(
+            f'[Epoch {cur_epoch + 1}/{epochs}] --- Loss: {total_loss / cnt :.4f}, MSE: {total_mse / cnt :.4f}, RMSE: {total_rmse / cnt :.4f}, MAE: {total_mae / cnt :.4f}')
 
     #定期验证模型效果
     if(cur_epoch + 1) % val_freq == 0:
@@ -198,7 +206,6 @@ for cur_epoch in range(epochs):
             cnt += 1
 
         train_logger.debug(f'[Epoch {cur_epoch + 1}/{epochs}] --- MSE:{total_mse / cnt :.4f}, RMSE:{total_rmse / cnt :.4f}, MAE:{total_mae / cnt :.4f}')
-
 
 
 
