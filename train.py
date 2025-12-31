@@ -26,13 +26,13 @@ train_loader, val_loader = DataLoader(train_data, batch_size, False), DataLoader
 net = Model(
             input_sizes=[[8, 8], [16, 16], [32, 32]], 
             output_dim=162,
-            hidden_dims=[[512, 256],[512, 256]],
+            hidden_dim=1024,
             num_experts=8,
-            top_p=0.6
+            top_k=2
         ).to(device)
 
 learning_rate = 1e-3
-lambdas = [0.9, 0.1, 0.01]
+lambdas = [0.9, 0.1]
 loss_fn = torch.nn.MSELoss()
 optimizer = optim.Adam(net.parameters(), lr=learning_rate)
 
@@ -129,8 +129,8 @@ for cur_epoch in range(epochs):
         #前向计算
         x_8, x_16, x_32, gt, vmin, vmax = x_8.to(device), x_16.to(device), x_32.to(device), gt.to(device), vmin.to(device), vmax.to(device)
 
-        output, routing_loss, diversity_loss = net(x_8, x_16, x_32)
-        output, routing_loss, diversity_loss = output.to(device), routing_loss.to(device), diversity_loss.to(device)
+        output, load_balance_loss  = net(x_8, x_16, x_32)
+        output, load_balance_loss = output.to(device), load_balance_loss.to(device)
 
         category_count = train_data.category_counts.to(device)
         projection_mask_matrix = train_data.projection_mask_matrix.to(device)
@@ -150,7 +150,7 @@ for cur_epoch in range(epochs):
 
         mse = loss_fn(output, gt)
         
-        loss = lambdas[0] * mse + lambdas[1] * routing_loss + lambdas[2] * diversity_loss
+        loss = lambdas[0] * mse + lambdas[1] * load_balance_loss
 
         #使用归一化数据计算的损失和指标
         total_mse += mse.item()
@@ -195,7 +195,7 @@ for cur_epoch in range(epochs):
             # move to device
             x_8, x_16, x_32, gt = x_8.to(device), x_16.to(device), x_32.to(device), gt.to(device)
 
-            output, routing_loss, diversity_loss = net(x_8, x_16, x_32)
+            output, load_balance_loss = net(x_8, x_16, x_32)
 
             category_count = val_data.category_counts.to(device)
             projection_mask_matrix = train_data.projection_mask_matrix.to(device)
