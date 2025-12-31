@@ -1,36 +1,33 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional, Tuple
 
+#每个专家网络就是简单的MLP input_size  --> hidden_size --> output_size
 class Expert(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dims = []):
+    def __init__(self, input_dim, output_dim, hidden_dim = 1024, dropout=0.1):
         super().__init__()
 
-        layers = []
-        layers.append(nn.Linear(input_dim, hidden_dims[0]))
-        layers.append(nn.GELU())
-        
-        for i in range(1, len(hidden_dims)):
-            layers.append(nn.Linear(hidden_dims[i-1], hidden_dims[i]))
-            layers.append(nn.GELU())
-        
-        layers.append(nn.Linear(hidden_dims[-1], output_dim))
-        
-        self.net = nn.Sequential(*layers)
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim),
+            nn.Dropout(dropout)
+        )
     
     def forward(self, x):
         return self.net(x)
 
-
 class MoeLayerAllLayer(nn.Module):
-    def __init__(self, input_dim, num_experts, hidden_dims, output_dim):
+    def __init__(self, input_dim, num_experts, hidden_dim, output_dim):
         super().__init__()
         self.num_experts = num_experts
         #门控网络
         self.gate = nn.Linear(input_dim, num_experts)
         #专家网络
         self.experts = nn.ModuleList([
-            Expert(input_dim, output_dim, hidden_dims) for _ in range(num_experts)
+            Expert(input_dim, output_dim, hidden_dim) for _ in range(num_experts)
         ])
         
     
@@ -53,116 +50,142 @@ class MoeLayerAllLayer(nn.Module):
 
         return output
 
-
-class MoeLayerTopPLayer(nn.Module):
-    def __init__(self, input_dim, num_experts, top_p, hidden_dims, output_dim):
+class MoeLayerTopKLayer(nn.Module):
+    def __init__(self, input_dim, num_experts, hidden_dim, output_dim, top_k=2,
+                 norm_topk_prob=True, dropout=0.1):
+        """
+        基于 Top-K 路由和 Switch Transformer 负载均衡损失的 MOE 层
+        """
         super().__init__()
         self.num_experts = num_experts
-        self.top_p = top_p
-        #门控网络
-        self.gate = nn.Linear(input_dim, num_experts)
+        self.top_k = min(top_k, num_experts)
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.norm_topk_prob = norm_topk_prob
+
+        # 门控网络
+        self.gate = nn.Linear(input_dim, num_experts, bias=False)
+
         #专家网络
         self.experts = nn.ModuleList([
-            Expert(input_dim, output_dim, hidden_dims) for _ in range(num_experts)
+            Expert(input_dim, output_dim, hidden_dim) for _ in range(num_experts)
         ])
-    
-    def forward(self, x):
-        # 1. 门控网络
-        logits = self.gate(x)
-        probs = torch.softmax(logits, dim=-1)  # (batch_size, num_experts)
-        
-        # 2. 计算所有专家的输出 (为了正确的 Diversity Loss，这里需要计算所有专家)
-        expert_outputs_list = []
-        for expert in self.experts:
-            expert_outputs_list.append(expert(x).unsqueeze(1))
-        
-        # (batch_size, num_experts, output_dim)
-        all_expert_outputs = torch.cat(expert_outputs_list, dim=1)
 
-        # 3. 计算损失 (使用原始概率和所有专家的输出来计算)
-        routing_loss = self.calculate_routing_loss(probs)
-        diversity_loss = self.calculate_diversity_loss(all_expert_outputs, probs)
+    def forward(self, x: torch.Tensor):
+        """
+        Args:
+            x: 输入张量 (batch_size, sequence_length, input_dim) 或 (batch_size, input_dim)
+        """
+        original_shape = x.shape
+        # 展平 batch 和 sequence 维度以便统一处理 -> (total_tokens, input_dim)
+        if x.dim() == 3:
+            x = x.view(-1, self.input_dim)
 
-        # 4. Top-P 采样与 Mask (只用于最终输出)
-        # expert_mask: (batch_size, num_experts)
-        expert_mask = self.top_sample(probs, self.top_p)
-        
+        batch_size_flat = x.shape[0]
 
-        # 5. 计算加权输出
-        # 重新归一化权重 (只对被选中的专家)
-        mask_probs = probs * expert_mask.float()
-        sum_weights = mask_probs.sum(dim=-1, keepdim=True) + 1e-8
-        normalized_mask_probs = mask_probs / sum_weights 
-        
-        # 加权求和: (batch_size, num_experts, 1) * (batch_size, num_experts, output_dim)
-        # 此时未被选中的位是0，不会影响结果
-        output = torch.sum(normalized_mask_probs.unsqueeze(-1) * all_expert_outputs, dim=1)
+        # 1. 门控网络计算路由 Logits
+        router_logits = self.gate(x)  # (total_tokens, num_experts)
 
-        return output, routing_loss, diversity_loss
-    
-    def top_sample(self, probs, top_p):
-        #按概率从大到小排序，并拿到在原始序列中的索引
-        probs_sorted, indices = torch.sort(probs, dim=-1, descending=True)
-        #计算每个i位置的前缀累加概率和，选择p个专家
-        prob_accum = torch.cumsum(probs_sorted, dim=-1)
-        mask = prob_accum <= top_p
-        #防止top_p过小或者top_1概率太高，保证至少要选择概率最高的top_1专家
-        mask[:, 0] = True #现在的mask是相对于排好序的概率的
+        # 2. 计算路由概率 (Softmax)
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
 
-        #将mask映射回原始序列中
-        _, original_indices = torch.sort(indices, dim=-1)
-        mask_original = torch.gather(mask, -1, original_indices)
+        # 3. Top-K 选择
+        # selected_experts: (total_tokens, top_k)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
 
-        return mask_original #(batch_size, num_experts)
-    
-    #输入的概率是所有专家的概率，不是top-p专家归一化后的
-    def calculate_routing_loss(self, probs):
-        #加上1e-8防止Log中出现0
-        entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
-        return entropy.mean()  # 鼓励专家专业化
-    
-    #计算专家差异性损失
-    def calculate_diversity_loss(self, expert_outputs, probs, eps=1e-6):
-        batch_size, num_experts, output_dim = expert_outputs.shape
+        # 4. (可选) 对 top-k 权重进行归一化
+        if self.norm_topk_prob:
+            routing_weights = routing_weights / (routing_weights.sum(dim=-1, keepdim=True) + 1e-6)
 
-        # 1. 计算每个专家的平均关注度 (Mean Attention) -> \bar{g}_i
-        # (num_experts, 1)
-        mean_probs = probs.mean(dim=0, keepdim=True).T 
+        # 转换回输入数据类型
+        routing_weights = routing_weights.to(x.dtype)
 
-        # 2. 计算每个专家的“代表性方向”向量 -> \tilde{e}_i
-        # 修正：先在 batch 维度求平均，得到专家的平均输出向量
-        # (num_experts, output_dim)
-        expert_mean_raw = expert_outputs.mean(dim=0) 
-        
-        # 再进行 L2 归一化，确保它是单位向量 (Direction)
-        expert_norm = torch.norm(expert_mean_raw, p=2, dim=1, keepdim=True) + eps
-        expert_directions = expert_mean_raw / expert_norm
+        # 5. 初始化输出
+        final_output = torch.zeros(
+            (batch_size_flat, self.output_dim),
+            dtype=x.dtype,
+            device=x.device
+        )
 
-        # 3. 构建矩阵 V
-        V = mean_probs * expert_directions
+        # 6. 创建专家掩码用于分发
+        # one_hot: (total_tokens, top_k, num_experts)
+        expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts)
+        # permute -> (num_experts, top_k, total_tokens) 以便按专家循环
+        expert_mask_flat = expert_mask.permute(2, 1, 0)
 
-        # 4. 计算 Gram 矩阵: G = V * V^T
-        # (num_experts, num_experts)
-        gram = torch.matmul(V, V.T)
+        # 7. 稀疏计算：遍历每个专家
+        for expert_idx in range(self.num_experts):
+            expert_layer = self.experts[expert_idx]
 
-        # 5. 计算 Log Determinant
-        # 添加 Identity 噪声保证数值稳定性
-        gram = gram + eps * torch.eye(num_experts, device=gram.device)
-        
-        # 这里直接最大化 log_det 相当于最大化体积
-        log_det = torch.logdet(gram)
-        
-        # 因为我们要最大化差异(体积)，也就是最小化 -LogDet
-        diversity_loss = -log_det
-        
-        return diversity_loss
+            # 查找分配给当前专家的 token
+            # idx: 在 top-k 中的排名索引 (0..k-1)
+            # top_x: token 在 batch 中的索引
+            idx, top_x = torch.where(expert_mask_flat[expert_idx])
 
+            if top_x.numel() > 0:
+                # 获取对应的输入 token
+                current_state = x[top_x]
+
+                # 专家前向传播
+                current_hidden_states = expert_layer(current_state)
+
+                # 乘以路由权重: routing_weights[top_x, idx]
+                weights = routing_weights[top_x, idx].unsqueeze(-1)  # (num_tokens, 1)
+                current_hidden_states = current_hidden_states * weights
+
+                # 累加到最终输出
+                # 注意：多个专家可能处理同一个 token (因为是 Top-K)，所以是 add
+                final_output.index_add_(0, top_x, current_hidden_states.to(x.dtype))
+
+        # 8. 还原形状
+        if len(original_shape) == 3:
+            final_output = final_output.view(original_shape[0], original_shape[1], self.output_dim)
+
+        # 9. 计算负载均衡损失 (Auxiliary Loss)
+        aux_loss = self._compute_load_balancing_loss(router_logits, selected_experts)
+
+        return final_output, aux_loss
+
+    def _compute_load_balancing_loss(self, gate_logits, selected_experts):
+        """
+        计算 Switch Transformer 风格的负载均衡损失
+        """
+        # gate_logits: (total_tokens, num_experts)
+        # selected_experts: (total_tokens, top_k)
+
+        total_tokens = gate_logits.shape[0]
+
+        # 1. 计算每个专家的路由概率
+        routing_probs = F.softmax(gate_logits, dim=-1)  # (total_tokens, num_experts)
+
+        # 2. 创建专家选择掩码
+        # selected_experts: (total_tokens, top_k)
+        expert_mask = torch.zeros_like(routing_probs)  # (total_tokens, num_experts)
+
+        # 将选中的专家位置标记为1
+        for i in range(self.top_k):
+            expert_mask.scatter_(1, selected_experts[:, i:i + 1], 1)
+
+        # 3. 计算每个专家的路由概率平均值
+        # (num_experts,)
+        router_prob_per_expert = routing_probs.mean(dim=0)
+
+        # 4. 计算每个专家被选中的频率
+        # (num_experts,)
+        tokens_per_expert = expert_mask.sum(dim=0) / (total_tokens * self.top_k)
+
+        # 5. 计算负载均衡损失
+        # Switch Transformer 公式: loss = num_experts * sum(f_i * p_i)
+        dot_product = torch.sum(router_prob_per_expert * tokens_per_expert)
+        aux_loss = self.num_experts * dot_product
+
+        return aux_loss
 
 class Model(nn.Module):
-    def __init__(self, input_sizes = [[8, 8], [16, 16], [32, 32]], output_dim = 162, hidden_dims = [[]],  num_experts = 8, top_p = 0.7):
+    def __init__(self, input_sizes = [[8, 8], [16, 16], [32, 32]], output_dim = 162, hidden_dim = 1024,  num_experts = 8, top_k = 2):
         super().__init__()
         self.num_experts = num_experts
-        self.top_p = top_p
+        self.top_k = top_k
         self.output_dim = output_dim
         # 全部激活
         input_dim = 0
@@ -172,15 +195,15 @@ class Model(nn.Module):
             input_dim=input_dim,
             output_dim=128,
             num_experts=self.num_experts,
-            hidden_dims=hidden_dims[0]
+            hidden_dim=hidden_dim
         )
         #top-p策略激活
-        self.moe_layer2 = MoeLayerTopPLayer(
+        self.moe_layer2 = MoeLayerTopKLayer(
             input_dim=128,
             output_dim=self.output_dim,
             num_experts=self.num_experts,
-            hidden_dims=hidden_dims[1],
-            top_p=top_p
+            hidden_dim=hidden_dim,
+            top_k=top_k
         )
 
     def forward(self, x_8, x_16, x_32):
@@ -191,8 +214,22 @@ class Model(nn.Module):
         output = self.moe_layer1(input)
         output = F.gelu(output)
         output = F.dropout(output, 0.1)
-        output, routing_loss, diversity_loss = self.moe_layer2(output) #模型输出形状为(bathc_size,  output_size[0] * output_size[1])
+        output, load_balance_loss = self.moe_layer2(output) #模型输出形状为(bathc_size,  output_size[0] * output_size[1])
 
-        return output, routing_loss, diversity_loss
+        return output, load_balance_loss
 
+
+if __name__ == '__main__':
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    batch_size = 32
+
+    net = Model().to(device)
+
+    x8 = torch.randn(batch_size, 8, 8).to(device)
+    x16 = torch.randn(batch_size, 16, 16).to(device)
+    x32 = torch.randn(batch_size, 32, 32).to(device)
+
+    y, loss = net(x8, x16, x32)
+    print(y.shape)
+    print(loss)
 

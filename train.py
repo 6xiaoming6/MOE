@@ -28,7 +28,7 @@ net = Model(
             output_dim=162,
             hidden_dims=[[512, 256],[512, 256]],
             num_experts=8,
-            top_p=0.7
+            top_p=0.6
         ).to(device)
 
 learning_rate = 1e-3
