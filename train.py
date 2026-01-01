@@ -33,10 +33,11 @@ net = Model(
             top_k=top_k
         ).to(device)
 
-learning_rate = 1e-3
+learning_rate = 3e-4
 lambdas = [1.0, 0.05]
 loss_fn = torch.nn.MSELoss()
-optimizer = optim.Adam(net.parameters(), lr=learning_rate)
+optimizer = optim.AdamW(net.parameters(), lr=learning_rate)
+optimizer_name = type(optimizer).__name__
 
 start_train_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S') #记录此次训练开始的时间，作为路径保存到模型中
 
@@ -116,7 +117,7 @@ def save_config():
     train_logger.info(f'learning_rate: {learning_rate}')
     train_logger.info(f'lambdas: {lambdas}')
     train_logger.info(f'loss_fn: MSELoss')
-    train_logger.info(f'optimizer: Adam')
+    train_logger.info(f'optimizer: {optimizer_name}')
 
 
 train_logger = setup_logger()
