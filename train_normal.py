@@ -12,7 +12,7 @@ from datetime import datetime
 import logging
 
 #训练时保存日志和模型的文件夹会加上这个名字以区分
-train_name = "origin_data"
+train_name = "normal_data"
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 batch_size = 64
@@ -23,7 +23,7 @@ save_root_dir = './checkpoints'
 if not os.path.isdir(save_root_dir):
     os.makedirs(save_root_dir)
 
-train_data, val_data = MyDataSet(root_dir='./data',normalize=False), MyDataSet(root_dir='./data', normalize=False, type='val')
+train_data, val_data = MyDataSet(root_dir='./data',normalize=True), MyDataSet(root_dir='./data', normalize=True, type='val')
 train_loader, val_loader = DataLoader(train_data, batch_size, False), DataLoader(val_data, batch_size, False)
 hidden_dim, num_experts, top_k = 1024, 8, 3
 
@@ -35,7 +35,7 @@ net = Model(
             top_k=top_k
         ).to(device)
 
-learning_rate = 3e-4
+learning_rate = 5e-4
 lambdas = [1.0, 0.05]
 loss_fn = torch.nn.MSELoss()
 optimizer = optim.AdamW(net.parameters(), lr=learning_rate)
@@ -132,31 +132,39 @@ for cur_epoch in range(epochs):
     cnt = 0
     total_loss = 0
     total_mse, total_rmse, total_mae =  0, 0, 0
-    for x_8, x_16, x_32, gt in train_loader:
+    origin_total_mse, origin_total_rmse, origin_total_mae =  0, 0, 0
+    for x_8, x_16, x_32, gt, gt_origin, vmin, vmax in train_loader:
         optimizer.zero_grad() #计算前梯度清零
 
         #前向计算
-        x_8, x_16, x_32, gt = x_8.to(device), x_16.to(device), x_32.to(device), gt.to(device)
+        x_8, x_16, x_32, gt, gt_origin, vmin, vmax = x_8.to(device), x_16.to(device), x_32.to(device), gt.to(device), gt_origin.to(device), vmin.to(device), vmax.to(device)
 
         output, load_balance_loss  = net(x_8, x_16, x_32)
         output, load_balance_loss = output.to(device), load_balance_loss.to(device)
 
         category_count = train_data.category_counts.to(device)
         projection_mask_matrix = train_data.projection_mask_matrix.to(device)
+        output_origin = output * (vmax.view(-1,1) - vmin.view(-1,1)) + vmin.view(-1,1)
 
-
-        output /= category_count
-        gt /= category_count
+        # output /= category_count
+        # gt /= category_count
 
         mse = loss_fn(output, gt)
         
         loss = lambdas[0] * mse + lambdas[1] * load_balance_loss
 
-
-        total_mse += loss_fn(output, gt).item()
-        total_rmse += torch.sqrt(loss_fn(output, gt)).item()
+        total_mse += mse.item()
+        total_rmse += torch.sqrt(mse).item()
         total_mae += torch.nn.L1Loss()(output, gt).item()
         total_loss += loss.item()
+
+        with torch.no_grad():
+            output_origin /= category_count
+            gt_origin /= category_count
+
+            origin_total_mse += loss_fn(output_origin, gt_origin).item()
+            origin_total_rmse += torch.sqrt(loss_fn(output_origin, gt_origin)).item()
+            origin_total_mae += torch.nn.L1Loss()(output_origin, gt_origin).item()
 
         cnt += 1
 
@@ -173,42 +181,44 @@ for cur_epoch in range(epochs):
         torch.save(net.state_dict(), model_save_path)
         torch.save(optimizer.state_dict(), opt_save_path)
 
-        # train_logger.info(f'[Epoch {cur_epoch + 1}/{epochs}] --- Origin MSE: {origin_total_mse / cnt :.4f}, Origin RMSE: {origin_total_rmse / cnt :.4f}, Origin MAE: {origin_total_mae / cnt :.4f}')
         train_logger.info(f'[Epoch {cur_epoch + 1}/{epochs}] --- model save to: {model_save_path}')
 
     if(cur_epoch + 1) % print_freq == 0:
         train_logger.info(
-            f'[Epoch {cur_epoch + 1}/{epochs}] --- Loss: {total_loss / cnt :.4f}, MSE: {total_mse / cnt :.4f}, RMSE: {total_rmse / cnt :.4f}, MAE: {total_mae / cnt :.4f}')
+            f'[Epoch {cur_epoch + 1}/{epochs}] --- Loss: {total_loss / cnt :.6f}, MSE: {total_mse / cnt :.6f}, RMSE: {total_rmse / cnt :.6f}, MAE: {total_mae / cnt :.6f}')
+        train_logger.info(
+            f'[Epoch {cur_epoch + 1}/{epochs}] --- Origin MSE: {origin_total_mse / cnt :.6f}, Origin RMSE: {origin_total_rmse / cnt :.6f}, Origin MAE: {origin_total_mae / cnt :.6f}')
 
     #定期验证模型效果
     if(cur_epoch + 1) % val_freq == 0:
         net.eval()
         cnt = 0
-        total_mse, total_rmse, total_mae = 0, 0, 0
-        for x_8, x_16, x_32, gt in val_loader:
+        origin_total_mse, origin_total_rmse, origin_total_mae = 0, 0, 0
+        for x_8, x_16, x_32, gt, gt_origin, vmin, vmax in val_loader:
             # move to device
-            x_8, x_16, x_32, gt = x_8.to(device), x_16.to(device), x_32.to(device), gt.to(device)
+            x_8, x_16, x_32, gt, gt_origin, vmin, vmax = x_8.to(device), x_16.to(device), x_32.to(device), gt.to(device), gt_origin.to(device), vmin.to(device), vmax.to(device)
 
             output, load_balance_loss = net(x_8, x_16, x_32)
 
             category_count = val_data.category_counts.to(device)
             projection_mask_matrix = train_data.projection_mask_matrix.to(device)
 
+            origin_output = output * (vmax.view(-1, 1) - vmin.view(-1, 1)) + vmin.view(-1, 1)
 
-            gt /= category_count
-            output /= category_count
+            gt_origin /= category_count
+            origin_output /= category_count
 
-            mse = torch.nn.MSELoss()(output, gt)
+            mse = loss_fn(origin_output, gt_origin)
             rmse = torch.sqrt(mse)
-            mae = torch.nn.L1Loss()(output, gt)
+            mae = torch.nn.L1Loss()(origin_output, gt_origin)
 
-            total_mse += mse.item()
-            total_rmse += rmse.item()
-            total_mae += mae.item()
+            origin_total_mse += mse.item()
+            origin_total_rmse += rmse.item()
+            origin_total_mae += mae.item()
 
             cnt += 1
 
-        train_logger.debug(f'[Epoch {cur_epoch + 1}/{epochs}] --- MSE:{total_mse / cnt :.4f}, RMSE:{total_rmse / cnt :.4f}, MAE:{total_mae / cnt :.4f}')
+        train_logger.debug(f'[Epoch {cur_epoch + 1}/{epochs}] --- MSE:{origin_total_mse / cnt :.4f}, RMSE:{origin_total_rmse / cnt :.4f}, MAE:{origin_total_mae / cnt :.4f}')
 
 
 

@@ -9,10 +9,11 @@ totensor = torchvision.transforms.ToTensor()
 
 class MyDataSet(Dataset):
     #type为train或者val
-    def __init__(self, root_dir, type = 'train', num_classes = 162, device='cuda:0', window_size=4):
+    def __init__(self, root_dir, normalize = True, type = 'train', num_classes = 162, device='cuda:0', window_size=4):
         self.num_classes = num_classes
         self.window_size = window_size
         self.device = device
+        self.normalize = normalize
 
         self.path_8          = os.path.join(root_dir, f'50/inf_from_{type}')
         self.path_16         = os.path.join(root_dir, f'50/sup16_from_{type}')
@@ -62,18 +63,29 @@ class MyDataSet(Dataset):
 
         vmin, vmax = mapping[0], mapping[1]
 
-        # Map data back to original range
-        data_8 = data_8 * (vmax - vmin) + vmin
-        data_16 = data_16 * (vmax - vmin) + vmin
-        data_32 = data_32 * (vmax - vmin) + vmin
-        data_32_gt = data_32_gt * (vmax - vmin) + vmin
+        if self.normalize:
+            data_32_gt_origin = data_32_gt * (vmax - vmin) + vmin
+            data_32_gt_origin = data_32_gt_origin.view(-1).float()
+            data_32_gt_origin = torch.matmul(data_32_gt_origin, self.projection_mask_matrix)
 
-        data_32_gt = data_32_gt.view(-1).float()
-        data_32_gt = torch.matmul(data_32_gt, self.projection_mask_matrix)
+            data_32_gt = data_32_gt.view(-1).float()
+            data_32_gt = torch.matmul(data_32_gt, self.projection_mask_matrix)
 
-        vmin, vmax = data_32_gt.min(), data_32_gt.max()
+            #返回的32_gt是归一化的值聚合后的结果，32_gt_origin是反归一化后再聚合的结果，vmin和vmmax是32_gt_origin的最小最大值
+            vmin, vmax = data_32_gt_origin.min(), data_32_gt_origin.max()
 
-        return data_8, data_16, data_32, data_32_gt, vmin, vmax
+            return data_8, data_16, data_32, data_32_gt, data_32_gt_origin, vmin, vmax
+        else:
+            # Map data back to original range
+            data_8 = data_8 * (vmax - vmin) + vmin
+            data_16 = data_16 * (vmax - vmin) + vmin
+            data_32 = data_32 * (vmax - vmin) + vmin
+            data_32_gt = data_32_gt * (vmax - vmin) + vmin
+
+            data_32_gt = data_32_gt.view(-1).float()
+            data_32_gt = torch.matmul(data_32_gt, self.projection_mask_matrix)
+
+            return data_8, data_16, data_32, data_32_gt
     
     
 if __name__ == "__main__":
