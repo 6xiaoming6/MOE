@@ -5,14 +5,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from model_v1 import Model
+from model_origin import Model
 from dataset import MyDataSet
 from torch.utils.data import DataLoader
 from datetime import datetime
 import logging
 
 #训练时保存日志和模型的文件夹会加上这个名字以区分
-train_name = "origin_data"
+train_name = "train_origin_data_origin_model"
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 batch_size = 64
@@ -25,18 +25,18 @@ if not os.path.isdir(save_root_dir):
 
 train_data, val_data = MyDataSet(root_dir='./data',normalize=False), MyDataSet(root_dir='./data', normalize=False, type='val')
 train_loader, val_loader = DataLoader(train_data, batch_size, False), DataLoader(val_data, batch_size, False)
-hidden_dim, num_experts, top_k = 1024, 8, 3
+hidden_dims, num_experts, top_p = [[512, 256],[256, 512]], 8, 0.6
 
 net = Model(
             input_sizes=[[8, 8], [16, 16], [32, 32]], 
             output_dim=162,
-            hidden_dim=hidden_dim,
+            hidden_dims=hidden_dims,
             num_experts=num_experts,
-            top_k=top_k
+            top_p=top_p
         ).to(device)
 
-learning_rate = 3e-4
-lambdas = [1.0, 0.05]
+learning_rate = 1e-3
+lambdas = [1.0, 0.05, 0.01]
 loss_fn = torch.nn.MSELoss()
 optimizer = optim.AdamW(net.parameters(), lr=learning_rate)
 optimizer_name = type(optimizer).__name__
@@ -112,9 +112,9 @@ def setup_logger():
     return logger
 
 def save_config():
-    train_logger.info(f'hidden_num: {hidden_dim}')
+    train_logger.info(f'hidden_nums: {hidden_dims}')
     train_logger.info(f'num_experts: {num_experts}')
-    train_logger.info(f'top-k: {top_k}')
+    train_logger.info(f'top-p: {top_p}')
     train_logger.info(f'device: {device}')
     train_logger.info(f'batch_size: {batch_size}')
     train_logger.info(f'epochs: {epochs}')
@@ -138,8 +138,8 @@ for cur_epoch in range(epochs):
         #前向计算
         x_8, x_16, x_32, gt = x_8.to(device), x_16.to(device), x_32.to(device), gt.to(device)
 
-        output, load_balance_loss  = net(x_8, x_16, x_32)
-        output, load_balance_loss = output.to(device), load_balance_loss.to(device)
+        output, routing_loss, diversity_loss  = net(x_8, x_16, x_32)
+        output, routing_loss, diversity_loss = output.to(device), routing_loss.to(device), diversity_loss.to(device)
 
         category_count = train_data.category_counts.to(device)
         projection_mask_matrix = train_data.projection_mask_matrix.to(device)
@@ -150,7 +150,7 @@ for cur_epoch in range(epochs):
 
         mse = loss_fn(output, gt)
         
-        loss = lambdas[0] * mse + lambdas[1] * load_balance_loss
+        loss = lambdas[0] * mse + lambdas[1] * routing_loss + lambdas[2] * diversity_loss
 
 
         total_mse += loss_fn(output, gt).item()
@@ -173,7 +173,6 @@ for cur_epoch in range(epochs):
         torch.save(net.state_dict(), model_save_path)
         torch.save(optimizer.state_dict(), opt_save_path)
 
-        # train_logger.info(f'[Epoch {cur_epoch + 1}/{epochs}] --- Origin MSE: {origin_total_mse / cnt :.4f}, Origin RMSE: {origin_total_rmse / cnt :.4f}, Origin MAE: {origin_total_mae / cnt :.4f}')
         train_logger.info(f'[Epoch {cur_epoch + 1}/{epochs}] --- model save to: {model_save_path}')
 
     if(cur_epoch + 1) % print_freq == 0:
@@ -189,7 +188,7 @@ for cur_epoch in range(epochs):
             # move to device
             x_8, x_16, x_32, gt = x_8.to(device), x_16.to(device), x_32.to(device), gt.to(device)
 
-            output, load_balance_loss = net(x_8, x_16, x_32)
+            output, routing_loss, diversity_loss  = net(x_8, x_16, x_32)
 
             category_count = val_data.category_counts.to(device)
             projection_mask_matrix = train_data.projection_mask_matrix.to(device)

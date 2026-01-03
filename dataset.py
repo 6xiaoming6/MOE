@@ -76,6 +76,7 @@ class MyDataSet(Dataset):
 
             return data_8, data_16, data_32, data_32_gt, data_32_gt_origin, vmin, vmax
         else:
+            #不归一化返回的8,16,32都是映射回原始范围的数据，gt是映射后再聚合的结果
             # Map data back to original range
             data_8 = data_8 * (vmax - vmin) + vmin
             data_16 = data_16 * (vmax - vmin) + vmin

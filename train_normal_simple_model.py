@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from model_v1 import Model
+from model_simple import Model
 from dataset import MyDataSet
 from torch.utils.data import DataLoader
 from datetime import datetime
@@ -35,7 +35,7 @@ net = Model(
             top_k=top_k
         ).to(device)
 
-learning_rate = 5e-4
+learning_rate = 1e-3
 lambdas = [1.0, 0.05]
 loss_fn = torch.nn.MSELoss()
 optimizer = optim.AdamW(net.parameters(), lr=learning_rate)
@@ -159,8 +159,8 @@ for cur_epoch in range(epochs):
         total_loss += loss.item()
 
         with torch.no_grad():
-            output_origin /= category_count
-            gt_origin /= category_count
+            # output_origin /= category_count
+            # gt_origin /= category_count
 
             origin_total_mse += loss_fn(output_origin, gt_origin).item()
             origin_total_rmse += torch.sqrt(loss_fn(output_origin, gt_origin)).item()
